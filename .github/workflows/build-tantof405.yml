@@ -1,0 +1,88 @@
+name: Build TANTOF405 firmware
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "board-config/**"
+      - ".github/workflows/build-tantof405.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Betaflight 2026.12.0 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init firmware
+          git -C firmware remote add origin https://github.com/betaflight/betaflight.git
+          git -C firmware fetch --depth=1 origin 7a2d7fcdf119e3ac89f9f7a62b8c03963913e56b
+          git -C firmware checkout --detach FETCH_HEAD
+          grep -q '#define FC_VERSION_YEAR[[:space:]]\+2026' firmware/src/main/build/version.h
+          grep -q '#define FC_VERSION_MONTH[[:space:]]\+12' firmware/src/main/build/version.h
+
+      - name: Check board-specific pin assignments
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONFIG=board-config/configs/TANT/TANTOF405/config.h
+          grep -q '^#define SERVO1_PIN PB3$' "$CONFIG"
+          grep -q '^#define SERVO2_PIN PB1$' "$CONFIG"
+          if grep -q '^#define LED_STRIP_PIN PB3$' "$CONFIG"; then
+            echo "PB3 conflict: it cannot be both SERVO1 and LED_STRIP."
+            exit 1
+          fi
+          grep -q '^#define USE_ACC_SPI_ICM42688P$' "$CONFIG"
+          grep -q '^#define USE_GYRO_SPI_ICM42688P$' "$CONFIG"
+          grep -q '^#define USE_BARO_SPA06_003$' "$CONFIG"
+
+      - name: Build HEX and BIN
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace/firmware \
+            -e BETAFLIGHT_CONFIG=/workspace/board-config \
+            betaflight/betaflight-build:arm \
+            make CONFIG=TANTOF405 hex binary
+
+      - name: Verify firmware outputs and record checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEX=firmware/obj/betaflight_2026.12.0_STM32F405_TANTOF405.hex
+          BIN=firmware/obj/betaflight_2026.12.0_STM32F405_TANTOF405.bin
+          test -s "$HEX"
+          test -s "$BIN"
+          {
+            echo "Firmware: Betaflight 2026.12.0"
+            echo "Target: TANTOF405 / STM32F405"
+            echo "Firmware source commit: $(git -C firmware rev-parse HEAD)"
+            echo "Board config commit: $(git rev-parse HEAD)"
+            echo "SERVO1: PB3 (B03)"
+            echo "SERVO2: PB1 (B01)"
+            echo "IMU: ICM42688P"
+            echo "Barometer: DPS310"
+            echo
+            sha256sum "$HEX" "$BIN"
+          } > build-info.txt
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TANTOF405-Betaflight-2026.12.0
+          path: |
+            firmware/obj/betaflight_2026.12.0_STM32F405_TANTOF405.hex
+            firmware/obj/betaflight_2026.12.0_STM32F405_TANTOF405.bin
+            build-info.txt
+          if-no-files-found: error
+          retention-days: 30
